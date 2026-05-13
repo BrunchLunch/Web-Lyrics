@@ -247,7 +247,7 @@
         </div>
         <button id="refresh-btn" onclick="refreshPage()">↻</button>
       </div>
-      <div id="version">v4.3</div>
+      <div id="version">v4.4</div>
     </div>
 
     <div id="right">
@@ -675,7 +675,7 @@
             text: w.text, startPos: 0, startTime: now, duration: 200, revealed: false
           }));
           activeWordIdx = -1;
-          if (wordModeOn) renderLines();
+          if (wordModeOn || lineChanged) renderLines();
         }
         updateWordHighlights(state.words);
         return;
@@ -749,5 +749,5 @@
     connect();
   </script>
 </body>
-<!-- v4.3 -->
+<!-- v4.4 -->
 </html>
