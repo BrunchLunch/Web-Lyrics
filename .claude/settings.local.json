@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\ryana\\\\Desktop\\\\CodeTest\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Sort-Object FullName)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(find /c/Users/ryana/Desktop -name \"server.js\" -o -name \"display.html\" -o -name \"shower-bridge.js\" -o -name \"package.json\" 2>/dev/null)",
+      "Read(//c/Users/ryana/Desktop/**)"
+    ]
+  }
+}
