@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Shower Lyrics</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #0d0d0d;
+      font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+    }
+
+    /* ── Background ── */
+    #bg {
+      position: fixed;
+      inset: -100px;
+      background-size: cover;
+      background-position: center;
+      filter: blur(28px) brightness(0.38) contrast(1.1) saturate(2.2);
+      transform: scale(1.2);
+      transition: background-image 2.5s ease;
+      animation: drift 30s ease-in-out infinite alternate;
+    }
+
+    @keyframes drift {
+      0%   { transform: scale(1.2)  translate(0px,   0px);  }
+      20%  { transform: scale(1.25) translate(-25px,  15px); }
+      40%  { transform: scale(1.22) translate( 15px, -20px); }
+      60%  { transform: scale(1.28) translate(-15px, -25px); }
+      80%  { transform: scale(1.22) translate( 20px,  10px); }
+      100% { transform: scale(1.2)  translate(-10px,  20px); }
+    }
+
+    /* ── Layout ── */
+    #layout {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      width: 100%;
+      height: 100%;
+      padding: clamp(24px, 4vw, 56px) clamp(24px, 4.5vw, 64px);
+      gap: clamp(24px, 4vw, 64px);
+    }
+
+    /* ── Left panel ── */
+    #left {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      flex-shrink: 0;
+      width: clamp(140px, 26vw, 380px);
+      gap: clamp(10px, 1.2vw, 18px);
+    }
+
+    #album-art {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border-radius: clamp(8px, 1.2vw, 16px);
+      object-fit: cover;
+      box-shadow: 0 20px 70px rgba(0,0,0,0.75);
+      background: rgba(255,255,255,0.06);
+      transition: opacity 0.5s ease;
+      opacity: 0;
+    }
+    #album-art.loaded { opacity: 1; }
+
+    #track-name {
+      font-size: clamp(14px, 1.6vw, 22px);
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.2;
+    }
+
+    #artist {
+      font-size: clamp(12px, 1.1vw, 16px);
+      font-weight: 400;
+      color: rgba(255,255,255,0.5);
+      margin-top: -6px;
+    }
+
+    #source-badge {
+      font-size: clamp(9px, 0.75vw, 11px);
+      color: rgba(255,255,255,0.2);
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-top: -4px;
+    }
+
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-top: 2px;
+    }
+
+    #bridge-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.15);
+      flex-shrink: 0;
+      transition: background 0.6s ease, box-shadow 0.6s ease;
+    }
+    #bridge-dot.connected    { background: #4ade80; box-shadow: 0 0 6px #4ade80aa; }
+    #bridge-dot.disconnected { background: #f87171; box-shadow: 0 0 6px #f87171aa; }
+
+    #toggle-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    #toggle-wrap label {
+      font-size: clamp(10px, 0.85vw, 12px);
+      color: rgba(255,255,255,0.35);
+      cursor: pointer;
+    }
+
+    #toggle-icon {
+      font-size: clamp(12px, 1vw, 15px);
+      color: rgba(255,255,255,0.75);
+      width: 16px;
+      text-align: center;
+    }
+
+    #refresh-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: rgba(255,255,255,0.3);
+      font-size: clamp(14px, 1.2vw, 18px);
+      line-height: 1;
+      transition: color 0.2s, transform 0.4s ease;
+      padding: 0;
+    }
+
+    #refresh-btn:hover { color: rgba(255,255,255,0.7); }
+    #refresh-btn.spinning { transform: rotate(360deg); }
+
+    /* ── Lyrics panel ── */
+    #right {
+      flex: 1;
+      height: 100%;
+      overflow-y: scroll;
+      overflow-x: hidden;
+      scrollbar-width: none;
+      padding-top: 38%;
+      padding-bottom: 55%;
+      display: flex;
+      flex-direction: column;
+      gap: clamp(12px, 1.8vw, 26px);
+      scroll-behavior: auto;
+      mask-image: linear-gradient(
+        to bottom,
+        transparent 0%,
+        black 16%,
+        black 78%,
+        transparent 100%
+      );
+      -webkit-mask-image: linear-gradient(
+        to bottom,
+        transparent 0%,
+        black 16%,
+        black 78%,
+        transparent 100%
+      );
+    }
+
+    #right::-webkit-scrollbar { display: none; }
+
+    /* ── Lyric lines ── */
+    .lyric-line {
+      font-size: clamp(20px, 2.8vw, 42px);
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.4;
+      white-space: normal;
+      word-break: break-word;
+      flex-shrink: 0;
+      text-align: left;
+      opacity: 0.2;
+      transition: opacity 0.45s ease, font-size 0.3s ease;
+      will-change: opacity;
+    }
+
+    .lyric-line.dist-0 { opacity: 1;    font-size: clamp(24px, 3.4vw, 50px); }
+    .lyric-line.dist-1 { opacity: 0.45; }
+    .lyric-line.dist-2 { opacity: 0.28; }
+    .lyric-line.dist-3 { opacity: 0.16; }
+    .lyric-line.dist-4 { opacity: 0.09; }
+
+    .word-span {
+      display: inline;
+      margin-right: clamp(4px, 0.55vw, 9px);
+      -webkit-text-fill-color: transparent;
+      -webkit-background-clip: text;
+      background-clip: text;
+      background-image: linear-gradient(
+        to right,
+        rgba(255,255,255,0.22) 0%,
+        rgba(255,255,255,0.22) 100%
+      );
+    }
+
+    #waiting {
+      font-size: clamp(16px, 1.8vw, 24px);
+      color: rgba(255,255,255,0.2);
+      font-weight: 600;
+      opacity: 1;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="layout">
+
+    <div id="left">
+      <img id="album-art" src="" alt="">
+      <div id="track-name"></div>
+      <div id="artist"></div>
+      <div id="source-badge"></div>
+      <div id="controls">
+        <span id="bridge-dot" title="Bridge status"></span>
+        <div id="toggle-wrap" onclick="toggleWordMode()">
+          <span id="toggle-icon">✓</span>
+          <label>Words</label>
+        </div>
+        <button id="refresh-btn" onclick="refreshPage()">↻</button>
+      </div>
+    </div>
+
+    <div id="right">
+      <div id="waiting">Waiting for music…</div>
+    </div>
+
+  </div>
+
+  <script>
+    const bg          = document.getElementById('bg');
+    const albumArtEl  = document.getElementById('album-art');
+    const trackNameEl = document.getElementById('track-name');
+    const artistEl    = document.getElementById('artist');
+    const sourceBadge = document.getElementById('source-badge');
+    const lyricsEl    = document.getElementById('right');
+    const waitingEl   = document.getElementById('waiting');
+    const toggleIcon  = document.getElementById('toggle-icon');
+    const refreshBtn  = document.getElementById('refresh-btn');
+    const bridgeDot   = document.getElementById('bridge-dot');
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    const MAX_DIST      = 4;
+    let wordModeOn      = true;
+    let currentAlbumArt = '';
+    let allLines        = [];
+    let activeIdx       = -1;
+    let syncType        = 'LINE_SYNCED'; // FIX: was 'UNSYNCED', blocked advanceByPosition
+    let positionMs      = 0;
+    let positionSetAt   = performance.now();
+    let playing         = true;
+    let syncInterval    = null;
+    let wordStates      = [];
+    let activeWordIdx   = -1;
+    let rafId           = null;
+
+    // ── Cache ──────────────────────────────────────────────────────────────────
+    const CACHE_KEY = 'showerLyricsCache';
+    function saveCache(s) {
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          trackName: s.trackName, artist: s.artist,
+          albumArt:  s.albumArt,  lyricsSource: s.lyricsSource,
+          lines:     s.lines,     syncType: s.syncType,
+        }));
+      } catch(e) {}
+    }
+    function loadCache() {
+      try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); }
+      catch(e) { return null; }
+    }
+
+    // ── Album art ─────────────────────────────────────────────────────────────
+    function setAlbumArt(url) {
+      if (!url || url === currentAlbumArt) return;
+      currentAlbumArt = url;
+      const proxied = `/albumart?url=${encodeURIComponent(url)}`;
+      albumArtEl.classList.remove('loaded');
+      albumArtEl.onload  = () => albumArtEl.classList.add('loaded');
+      albumArtEl.onerror = () => {};
+      albumArtEl.src = proxied;
+      bg.style.backgroundImage = `url(${proxied})`;
+    }
+
+    // ── Utils ──────────────────────────────────────────────────────────────────
+    function refreshPage() {
+      refreshBtn.classList.add('spinning');
+      setTimeout(() => location.reload(), 420);
+    }
+
+    function toggleWordMode() {
+      wordModeOn = !wordModeOn;
+      toggleIcon.textContent = wordModeOn ? '✓' : '✕';
+      toggleIcon.style.color = wordModeOn
+        ? 'rgba(255,255,255,0.75)'
+        : 'rgba(255,255,255,0.25)';
+      if (!wordModeOn) stopRaf();
+      renderLines();
+    }
+
+    function currentPositionMs() {
+      if (!playing) return positionMs;
+      return positionMs + (performance.now() - positionSetAt);
+    }
+
+    // ── Gradient word helpers ──────────────────────────────────────────────────
+    function gradientFor(pct) {
+      const p  = Math.max(0, Math.min(100, pct));
+      const lo = Math.max(0, p - 5);
+      return `linear-gradient(to right, rgba(255,255,255,0.95) ${lo}%, rgba(255,255,255,0.22) ${p}%)`;
+    }
+    function setRevealed(span) {
+      span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.52) 100%, rgba(255,255,255,0.52) 100%)';
+    }
+    function setDim(span) {
+      span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.22) 100%, rgba(255,255,255,0.22) 100%)';
+    }
+    function setHint(span) {
+      span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.4) 100%, rgba(255,255,255,0.4) 100%)';
+    }
+
+    // ── RAF word animation ─────────────────────────────────────────────────────
+    function animateWords() {
+      rafId = requestAnimationFrame(animateWords);
+      const activeDiv = lyricsEl.querySelector('.dist-0');
+      if (!activeDiv || !wordStates.length) return;
+      const spans = activeDiv.querySelectorAll('.word-span');
+      if (!spans.length) return;
+      const now = performance.now();
+
+      wordStates.forEach((ws, i) => {
+        const span = spans[i];
+        if (!span || ws.revealed) return;
+        if (i < activeWordIdx) { ws.revealed = true; setRevealed(span); return; }
+        if (i > activeWordIdx) return;
+        let pct = ws.duration > 0
+          ? ws.startPos + ((now - ws.startTime) / ws.duration) * (100 - ws.startPos)
+          : ws.startPos;
+        pct = Math.min(100, pct);
+        span.style.backgroundImage = gradientFor(pct);
+        if (pct >= 99.5) { ws.revealed = true; setRevealed(span); }
+      });
+    }
+
+    function startRaf() { if (!rafId) rafId = requestAnimationFrame(animateWords); }
+    function stopRaf()  { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } }
+
+    // ── Smooth scroll ──────────────────────────────────────────────────────────
+    let scrollRaf = null;
+
+    function smoothScrollTo(target) {
+      if (scrollRaf) cancelAnimationFrame(scrollRaf);
+      const start     = lyricsEl.scrollTop;
+      const distance  = target - start;
+      const duration  = 420;
+      const startTime = performance.now();
+      function step(now) {
+        const elapsed  = now - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const ease = progress < 0.5
+          ? 4 * progress * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+        lyricsEl.scrollTop = start + distance * ease;
+        if (progress < 1) scrollRaf = requestAnimationFrame(step);
+      }
+      scrollRaf = requestAnimationFrame(step);
+    }
+
+    function scrollToActive() {
+      const activeEl = lyricsEl.querySelector('.dist-0');
+      if (!activeEl) return;
+      const containerH = lyricsEl.clientHeight;
+      const lineTop    = activeEl.offsetTop;
+      const lineH      = activeEl.offsetHeight;
+      smoothScrollTo(lineTop - containerH * 0.38 + lineH / 2);
+    }
+
+    // ── Render ─────────────────────────────────────────────────────────────────
+    function distClass(dist) {
+      return `dist-${Math.min(Math.abs(dist), MAX_DIST)}`;
+    }
+
+    function renderLines() {
+      stopRaf();
+      lyricsEl.innerHTML = '';
+
+      // FIX: guard — show waiting text instead of blank when no active line
+      if (activeIdx === -1 || !allLines.length) {
+        lyricsEl.appendChild(waitingEl);
+        return;
+      }
+
+      allLines.forEach((line, i) => {
+        const div  = document.createElement('div');
+        div.className = `lyric-line ${distClass(i - activeIdx)}`;
+
+        if (i === activeIdx && wordModeOn && wordStates.length > 0) {
+          // Word mode: active line gets gradient spans
+          wordStates.forEach((ws, wi) => {
+            const span = document.createElement('span');
+            span.className = 'word-span';
+            span.textContent = ws.text;
+            if (ws.revealed)               setRevealed(span);
+            else if (wi === activeWordIdx) span.style.backgroundImage = gradientFor(ws.startPos);
+            else if (wi === 0)             setHint(span);
+            else                           setDim(span);
+            div.appendChild(span);
+            div.appendChild(document.createTextNode(' '));
+          });
+          startRaf();
+        } else {
+          // Plain mode or non-active: white text via color:#fff on .lyric-line
+          div.textContent = line.text || '•••';
+        }
+
+        lyricsEl.appendChild(div);
+      });
+
+      scrollToActive();
+    }
+
+    // ── Sync ───────────────────────────────────────────────────────────────────
+    // FIX: always build word states from line text so spans render even when
+    // Spotify's lyrics panel is closed and no wordupdate messages arrive.
+    function synthesizeWordStates(text) {
+      const now = performance.now();
+      wordStates    = (text || '').split(/\s+/).filter(Boolean).map(w => ({
+        text: w, startPos: 0, startTime: now, duration: 200, revealed: false
+      }));
+      activeWordIdx = -1;
+    }
+
+    function advanceByPosition() {
+      if (!allLines.length || syncType === 'UNSYNCED') return;
+      const pos = currentPositionMs();
+      let newIdx = 0;
+      for (let i = 0; i < allLines.length; i++) {
+        if (allLines[i].startTimeMs <= pos) newIdx = i;
+        else break;
+      }
+      if (newIdx !== activeIdx) {
+        activeIdx     = newIdx;
+        activeWordIdx = -1;
+        if (wordModeOn && allLines[activeIdx]?.text) {
+          synthesizeWordStates(allLines[activeIdx].text);
+        } else {
+          wordStates = [];
+        }
+        renderLines();
+      }
+    }
+
+    function startSyncInterval() {
+      clearInterval(syncInterval);
+      syncInterval = setInterval(advanceByPosition, 200);
+    }
+
+    // ── Word highlight update ──────────────────────────────────────────────────
+    function updateWordHighlights(words) {
+      if (!wordModeOn) return;
+      const now = performance.now();
+
+      words.forEach((w, i) => {
+        const ws = wordStates[i];
+        if (!ws || ws.revealed) return;
+        const pos = w.pos;
+        if (pos >= 100) { ws.revealed = true; return; }
+        if (pos > 0) {
+          if (activeWordIdx !== i) {
+            if (activeWordIdx >= 0 && wordStates[activeWordIdx])
+              wordStates[activeWordIdx].revealed = true;
+            activeWordIdx = i;
+            ws.startPos   = pos;
+            ws.startTime  = now;
+            ws.duration   = 200;
+          } else {
+            const elapsed = now - ws.startTime;
+            const gain    = pos - ws.startPos;
+            if (gain > 0 && elapsed > 0) {
+              ws.duration  = (elapsed / gain) * (100 - pos);
+              ws.startPos  = pos;
+              ws.startTime = now;
+            }
+          }
+        }
+      });
+
+      const activeDiv = lyricsEl.querySelector('.dist-0');
+      if (activeDiv) {
+        const spans = activeDiv.querySelectorAll('.word-span');
+        wordStates.forEach((ws, i) => {
+          if (spans[i] && ws.revealed) setRevealed(spans[i]);
+        });
+      }
+    }
+
+    // ── State machine ──────────────────────────────────────────────────────────
+    function updateState(state) {
+      // Always update track info from any message that carries it
+      if (state.albumArt)  setAlbumArt(state.albumArt);
+      if (state.trackName) trackNameEl.textContent = state.trackName;
+      if (state.artist)    artistEl.textContent    = state.artist;
+      if (state.lyricsSource) sourceBadge.textContent = state.lyricsSource;
+
+      // trackInfo: bridge sends this immediately so display shows album art
+      // + track name even before lyrics load
+      if (state.type === 'trackInfo') return;
+
+      if (state.type === 'fullLyrics') {
+        stopRaf();
+        clearInterval(syncInterval);
+        allLines      = state.lines;
+        syncType      = state.syncType || 'LINE_SYNCED';
+        positionMs    = state.positionMs || 0;
+        positionSetAt = performance.now();
+        playing       = true;
+        activeIdx     = -1;
+        wordStates    = [];
+        activeWordIdx = -1;
+        saveCache(state);
+        advanceByPosition();
+        startSyncInterval();
+        return;
+      }
+
+      if (state.type === 'position') {
+        positionMs    = state.positionMs;
+        positionSetAt = performance.now();
+        advanceByPosition();
+        return;
+      }
+
+      if (state.type === 'playpause') {
+        playing       = state.playing;
+        positionMs    = state.positionMs;
+        positionSetAt = performance.now();
+        return;
+      }
+
+      if (state.type === 'wordupdate') {
+        const now = performance.now();
+        // Replace synthesized states with real word data when count differs
+        if (wordStates.length !== state.words.length) {
+          wordStates    = state.words.map(w => ({
+            text: w.text, startPos: 0, startTime: now, duration: 200, revealed: false
+          }));
+          activeWordIdx = -1;
+          if (wordModeOn) renderLines();
+        }
+        updateWordHighlights(state.words);
+        return;
+      }
+
+      // v2: bridge sends noLyrics when track info is known but no lyrics found
+      // Show album art + track name but keep waiting message instead of blank
+      if (state.type === 'noLyrics') {
+        stopRaf(); clearInterval(syncInterval);
+        allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1;
+        lyricsEl.innerHTML = '';
+        waitingEl.textContent = 'No lyrics found';
+        lyricsEl.appendChild(waitingEl);
+        return;
+      }
+
+      if (state.type === 'line') {
+        if (state.lyric === '') {
+          stopRaf(); clearInterval(syncInterval);
+          allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1;
+          lyricsEl.innerHTML = '';
+          waitingEl.textContent = 'Waiting for music…';
+          lyricsEl.appendChild(waitingEl);
+          return;
+        }
+        if (state.lyric) {
+          // Always accept DOM lines as fallback regardless of syncType
+          stopRaf(); wordStates = []; activeWordIdx = -1;
+          allLines.push({ startTimeMs: 0, text: state.lyric });
+          if (allLines.length > 14) allLines = allLines.slice(-14);
+          activeIdx = allLines.length - 1;
+          renderLines();
+        }
+      }
+    }
+
+    // ── WebSocket + bridge dot ─────────────────────────────────────────────────
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}`);
+      ws.onmessage = e => { try { updateState(JSON.parse(e.data)); } catch(_) {} };
+      ws.onclose   = () => { stopRaf(); setTimeout(connect, 2000); };
+      ws.onerror   = () => ws.close();
+    }
+
+    function pollBridgeStatus() {
+      fetch('/status').then(r => r.json()).then(s => {
+        const on = s.spicetifyBridge > 0;
+        bridgeDot.className = on ? 'connected' : 'disconnected';
+        bridgeDot.title = on ? 'Bridge connected' : 'Bridge disconnected';
+      }).catch(() => { bridgeDot.className = 'disconnected'; });
+    }
+    setInterval(pollBridgeStatus, 3000);
+    pollBridgeStatus();
+
+    // Restore from cache instantly — all functions defined above this point
+    (function() {
+      const c = loadCache();
+      if (!c) return;
+      if (c.trackName) trackNameEl.textContent = c.trackName;
+      if (c.artist)    artistEl.textContent    = c.artist;
+      if (c.lyricsSource) sourceBadge.textContent = c.lyricsSource;
+      if (c.albumArt)  setAlbumArt(c.albumArt);
+      if (c.lines?.length) {
+        allLines  = c.lines;
+        syncType  = c.syncType || 'LINE_SYNCED';
+        activeIdx = 0;
+        synthesizeWordStates(allLines[0]?.text || '');
+        renderLines();
+      }
+    })();
+
+    connect();
+  </script>
+</body>
+<!-- v3 -->
+</html>
