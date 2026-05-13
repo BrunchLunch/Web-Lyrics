@@ -38,7 +38,7 @@ app.get('/status', (req, res) => {
     lyricsSource:    lastFullLyrics?.lyricsSource || 'none',
     lyricsLines:     lastFullLyrics?.lines?.length || 0,
     syncType:        lastFullLyrics?.syncType || 'none',
-    positionMs:      currentState.positionMs || 0,
+    positionMs:      Math.round(currentPositionMs()),
   });
 });
 
@@ -103,7 +103,15 @@ let currentState = {
   artist:    ''
 };
 
-let lastFullLyrics = null;
+let lastFullLyrics  = null;
+let positionSetAt   = Date.now();
+let playerIsPlaying = true;
+
+function currentPositionMs() {
+  const base = currentState.positionMs || 0;
+  if (!playerIsPlaying) return base;
+  return base + (Date.now() - positionSetAt);
+}
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ server });
@@ -162,14 +170,19 @@ wss.on('connection', (ws, req) => {
 
       // Update state based on message type
       if (parsed.type === 'fullLyrics') {
-        lastFullLyrics = parsed;
-        currentState   = parsed;
+        lastFullLyrics      = parsed;
+        currentState        = parsed;
+        positionSetAt       = Date.now();
+        playerIsPlaying     = true;
         console.log(`[Lyrics] ${parsed.trackName} — ${parsed.artist} | ${parsed.lyricsSource} | ${parsed.lines?.length} lines`);
       } else if (parsed.type === 'position') {
         currentState.positionMs = parsed.positionMs;
+        positionSetAt           = Date.now();
       } else if (parsed.type === 'playpause') {
-        currentState.playing   = parsed.playing;
+        currentState.playing    = parsed.playing;
         currentState.positionMs = parsed.positionMs;
+        positionSetAt           = Date.now();
+        playerIsPlaying         = parsed.playing;
         console.log(`[Player] ${parsed.playing ? '▶ Playing' : '⏸ Paused'}`);
       } else if (parsed.type === 'line') {
         if (parsed.lyric === '') {

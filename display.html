@@ -129,7 +129,7 @@
 
     #toggle-icon {
       font-size: clamp(12px, 1vw, 15px);
-      color: rgba(255,255,255,0.75);
+      color: rgba(255,255,255,0.25);
       width: 16px;
       text-align: center;
     }
@@ -147,6 +147,14 @@
 
     #refresh-btn:hover { color: rgba(255,255,255,0.7); }
     #refresh-btn.spinning { transform: rotate(360deg); }
+
+    #version {
+      font-size: clamp(8px, 0.6vw, 10px);
+      color: rgba(255,255,255,0.12);
+      font-weight: 400;
+      letter-spacing: 0.08em;
+      margin-top: auto;
+    }
 
     /* ── Lyrics panel ── */
     #right {
@@ -189,16 +197,16 @@
       word-break: break-word;
       flex-shrink: 0;
       text-align: left;
-      opacity: 0.2;
+      opacity: 0.03;
       transition: opacity 0.45s ease, font-size 0.3s ease;
       will-change: opacity;
     }
 
-    .lyric-line.dist-0 { opacity: 1;    font-size: clamp(24px, 3.4vw, 50px); }
-    .lyric-line.dist-1 { opacity: 0.45; }
-    .lyric-line.dist-2 { opacity: 0.28; }
-    .lyric-line.dist-3 { opacity: 0.16; }
-    .lyric-line.dist-4 { opacity: 0.09; }
+    .lyric-line.dist-0 { opacity: 1;    font-size: clamp(27px, 3.9vw, 57px); text-shadow: 0 0 60px rgba(255,255,255,0.40); }
+    .lyric-line.dist-1 { opacity: 0.30; }
+    .lyric-line.dist-2 { opacity: 0.14; }
+    .lyric-line.dist-3 { opacity: 0.07; }
+    .lyric-line.dist-4 { opacity: 0.03; }
 
     .word-span {
       display: inline;
@@ -234,11 +242,12 @@
       <div id="controls">
         <span id="bridge-dot" title="Bridge status"></span>
         <div id="toggle-wrap" onclick="toggleWordMode()">
-          <span id="toggle-icon">✓</span>
+          <span id="toggle-icon">✕</span>
           <label>Words</label>
         </div>
         <button id="refresh-btn" onclick="refreshPage()">↻</button>
       </div>
+      <div id="version">v4.3</div>
     </div>
 
     <div id="right">
@@ -261,11 +270,13 @@
 
     // ── State ─────────────────────────────────────────────────────────────────
     const MAX_DIST      = 4;
-    let wordModeOn      = true;
+    let wordModeOn      = false;
+    let hasRealWordSync = false;
     let currentAlbumArt = '';
     let allLines        = [];
     let activeIdx       = -1;
-    let syncType        = 'LINE_SYNCED'; // FIX: was 'UNSYNCED', blocked advanceByPosition
+    let prevActiveIdx   = -1;
+    let syncType        = 'LINE_SYNCED';
     let positionMs      = 0;
     let positionSetAt   = performance.now();
     let playing         = true;
@@ -273,6 +284,10 @@
     let wordStates      = [];
     let activeWordIdx   = -1;
     let rafId           = null;
+
+    // ── Line highlight state ───────────────────────────────────────────────────
+    let lineHighlightRafId = null;
+    let activeLineEl       = null;
 
     // ── Cache ──────────────────────────────────────────────────────────────────
     const CACHE_KEY = 'showerLyricsCache';
@@ -314,7 +329,6 @@
       toggleIcon.style.color = wordModeOn
         ? 'rgba(255,255,255,0.75)'
         : 'rgba(255,255,255,0.25)';
-      if (!wordModeOn) stopRaf();
       renderLines();
     }
 
@@ -323,7 +337,7 @@
       return positionMs + (performance.now() - positionSetAt);
     }
 
-    // ── Gradient word helpers ──────────────────────────────────────────────────
+    // ── Gradient word helpers (Spicetify word sync) ────────────────────────────
     function gradientFor(pct) {
       const p  = Math.max(0, Math.min(100, pct));
       const lo = Math.max(0, p - 5);
@@ -339,7 +353,7 @@
       span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.4) 100%, rgba(255,255,255,0.4) 100%)';
     }
 
-    // ── RAF word animation ─────────────────────────────────────────────────────
+    // ── RAF word animation (Spicetify real word sync only) ─────────────────────
     function animateWords() {
       rafId = requestAnimationFrame(animateWords);
       const activeDiv = lyricsEl.querySelector('.dist-0');
@@ -365,14 +379,56 @@
     function startRaf() { if (!rafId) rafId = requestAnimationFrame(animateWords); }
     function stopRaf()  { if (rafId) { cancelAnimationFrame(rafId); rafId = null; } }
 
+    // ── Line highlight animation (line-sync only, no real word data) ───────────
+    // Fills active line text top-to-bottom from normal → full brightness
+    // over the line's duration, giving a sense of how long the line lasts.
+    function animateLineHighlight() {
+      lineHighlightRafId = requestAnimationFrame(animateLineHighlight);
+      if (!activeLineEl || activeIdx < 0) return;
+      const line     = allLines[activeIdx];
+      const nextLine = allLines[activeIdx + 1];
+      if (!line) return;
+
+      const duration = nextLine
+        ? Math.max(200, nextLine.startTimeMs - line.startTimeMs)
+        : 4000;
+      const elapsed = currentPositionMs() - line.startTimeMs;
+      const pct     = Math.min(100, Math.max(0, (elapsed / duration) * 100));
+      const lo      = Math.max(0, pct - 6);
+      const hi      = Math.min(100, pct + 6);
+
+      activeLineEl.style.backgroundImage =
+        `linear-gradient(to bottom, rgba(255,255,255,1) ${lo}%, rgba(255,255,255,0.42) ${hi}%)`;
+    }
+
+    function startLineHighlight(el) {
+      activeLineEl = el;
+      el.style.webkitTextFillColor  = 'transparent';
+      el.style.webkitBackgroundClip = 'text';
+      el.style.backgroundClip       = 'text';
+      el.style.backgroundImage      =
+        'linear-gradient(to bottom, rgba(255,255,255,0.42) 0%, rgba(255,255,255,0.42) 0%)';
+      if (!lineHighlightRafId) lineHighlightRafId = requestAnimationFrame(animateLineHighlight);
+    }
+
+    function stopLineHighlight() {
+      if (lineHighlightRafId) { cancelAnimationFrame(lineHighlightRafId); lineHighlightRafId = null; }
+      if (activeLineEl) {
+        activeLineEl.style.webkitTextFillColor  = '';
+        activeLineEl.style.webkitBackgroundClip = '';
+        activeLineEl.style.backgroundClip       = '';
+        activeLineEl.style.backgroundImage      = '';
+        activeLineEl = null;
+      }
+    }
+
     // ── Smooth scroll ──────────────────────────────────────────────────────────
     let scrollRaf = null;
 
-    function smoothScrollTo(target) {
+    function smoothScrollTo(target, duration = 420) {
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       const start     = lyricsEl.scrollTop;
       const distance  = target - start;
-      const duration  = 420;
       const startTime = performance.now();
       function step(now) {
         const elapsed  = now - startTime;
@@ -392,7 +448,11 @@
       const containerH = lyricsEl.clientHeight;
       const lineTop    = activeEl.offsetTop;
       const lineH      = activeEl.offsetHeight;
-      smoothScrollTo(lineTop - containerH * 0.38 + lineH / 2);
+      const target     = lineTop - containerH * 0.28 + lineH / 2;
+      const dist       = Math.abs(target - lyricsEl.scrollTop);
+      // Faster if catching up (large distance), slower for gentle step-by-step advances
+      const dur = dist < 80 ? 200 : dist > 500 ? 300 : 420;
+      smoothScrollTo(target, dur);
     }
 
     // ── Render ─────────────────────────────────────────────────────────────────
@@ -400,82 +460,123 @@
       return `dist-${Math.min(Math.abs(dist), MAX_DIST)}`;
     }
 
-    function renderLines() {
-      stopRaf();
-      lyricsEl.innerHTML = '';
+    function normalizeText(t) {
+      return (t || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    }
 
-      // FIX: guard — show waiting text instead of blank when no active line
+    // Find allLines index whose text matches Spicetify's current words.
+    // Searches outward from activeIdx so nearby lines are found fast.
+    function findLineByWords(words) {
+      const target = normalizeText(words.map(w => w.text).join(' '));
+      if (!target) return -1;
+      for (let delta = 0; delta < allLines.length; delta++) {
+        const fwd = activeIdx + delta;
+        const bwd = activeIdx - delta;
+        if (fwd < allLines.length && normalizeText(allLines[fwd].text) === target) return fwd;
+        if (delta > 0 && bwd >= 0 && normalizeText(allLines[bwd].text) === target) return bwd;
+      }
+      return -1;
+    }
+
+    function applyActiveLineMode(div) {
+      if (wordModeOn && hasRealWordSync && wordStates.length > 0) {
+        stopLineHighlight();
+        div.innerHTML = '';
+        wordStates.forEach((ws, wi) => {
+          const span = document.createElement('span');
+          span.className   = 'word-span';
+          span.textContent = ws.text;
+          if (ws.revealed)               setRevealed(span);
+          else if (wi === activeWordIdx) span.style.backgroundImage = gradientFor(ws.startPos);
+          else if (wi === 0)             setHint(span);
+          else                           setDim(span);
+          div.appendChild(span);
+          div.appendChild(document.createTextNode(' '));
+        });
+        startRaf();
+      } else if (wordModeOn && !hasRealWordSync) {
+        stopRaf();
+        if (div.querySelector('.word-span')) div.textContent = allLines[activeIdx].text || '•••';
+        if (activeLineEl !== div) { stopLineHighlight(); startLineHighlight(div); }
+      } else {
+        stopRaf();
+        stopLineHighlight();
+        if (div.querySelector('.word-span')) div.textContent = allLines[activeIdx].text || '•••';
+      }
+    }
+
+    function renderLines() {
       if (activeIdx === -1 || !allLines.length) {
+        stopRaf(); stopLineHighlight();
+        lyricsEl.innerHTML = '';
         lyricsEl.appendChild(waitingEl);
+        prevActiveIdx = -1;
         return;
       }
 
-      allLines.forEach((line, i) => {
-        const div  = document.createElement('div');
-        div.className = `lyric-line ${distClass(i - activeIdx)}`;
+      const existingDivs = Array.from(lyricsEl.querySelectorAll('.lyric-line'));
+      const needRebuild  = existingDivs.length !== allLines.length;
 
-        if (i === activeIdx && wordModeOn && wordStates.length > 0) {
-          // Word mode: active line gets gradient spans
-          wordStates.forEach((ws, wi) => {
-            const span = document.createElement('span');
-            span.className = 'word-span';
-            span.textContent = ws.text;
-            if (ws.revealed)               setRevealed(span);
-            else if (wi === activeWordIdx) span.style.backgroundImage = gradientFor(ws.startPos);
-            else if (wi === 0)             setHint(span);
-            else                           setDim(span);
-            div.appendChild(span);
-            div.appendChild(document.createTextNode(' '));
-          });
-          startRaf();
-        } else {
-          // Plain mode or non-active: white text via color:#fff on .lyric-line
+      if (needRebuild) {
+        // Full rebuild only when line count changes (new song / streaming mode)
+        stopRaf(); stopLineHighlight();
+        lyricsEl.innerHTML = '';
+        allLines.forEach((line, i) => {
+          const div = document.createElement('div');
+          div.className  = `lyric-line ${distClass(i - activeIdx)}`;
           div.textContent = line.text || '•••';
+          lyricsEl.appendChild(div);
+        });
+      } else {
+        // In-place class update — CSS opacity transitions fire naturally
+        // Clean up the old active line's special state before its class changes
+        if (prevActiveIdx !== activeIdx && prevActiveIdx >= 0 && existingDivs[prevActiveIdx]) {
+          const oldDiv = existingDivs[prevActiveIdx];
+          if (activeLineEl === oldDiv) stopLineHighlight();
+          if (oldDiv.querySelector('.word-span')) { stopRaf(); oldDiv.textContent = allLines[prevActiveIdx]?.text || '•••'; }
         }
+        existingDivs.forEach((div, i) => {
+          div.className = `lyric-line ${distClass(i - activeIdx)}`;
+        });
+      }
 
-        lyricsEl.appendChild(div);
-      });
+      prevActiveIdx = activeIdx;
+
+      const allDivs   = lyricsEl.querySelectorAll('.lyric-line');
+      const activeDiv = allDivs[activeIdx];
+      if (activeDiv) applyActiveLineMode(activeDiv);
 
       scrollToActive();
     }
 
     // ── Sync ───────────────────────────────────────────────────────────────────
-    // FIX: always build word states from line text so spans render even when
-    // Spotify's lyrics panel is closed and no wordupdate messages arrive.
-    function synthesizeWordStates(text) {
-      const now = performance.now();
-      wordStates    = (text || '').split(/\s+/).filter(Boolean).map(w => ({
-        text: w, startPos: 0, startTime: now, duration: 200, revealed: false
-      }));
-      activeWordIdx = -1;
-    }
-
     function advanceByPosition() {
       if (!allLines.length || syncType === 'UNSYNCED') return;
+      // While Spicetify has confirmed the active line via wordupdate, yield to it
+      if (hasRealWordSync && wordStates.length > 0) return;
       const pos = currentPositionMs();
       let newIdx = 0;
       for (let i = 0; i < allLines.length; i++) {
         if (allLines[i].startTimeMs <= pos) newIdx = i;
         else break;
       }
+      if (newIdx < activeIdx && activeIdx >= 0 && allLines[activeIdx]) {
+        if (allLines[activeIdx].startTimeMs - pos < 800) return;
+      }
       if (newIdx !== activeIdx) {
         activeIdx     = newIdx;
         activeWordIdx = -1;
-        if (wordModeOn && allLines[activeIdx]?.text) {
-          synthesizeWordStates(allLines[activeIdx].text);
-        } else {
-          wordStates = [];
-        }
+        wordStates    = [];
         renderLines();
       }
     }
 
     function startSyncInterval() {
       clearInterval(syncInterval);
-      syncInterval = setInterval(advanceByPosition, 200);
+      syncInterval = setInterval(advanceByPosition, 50);
     }
 
-    // ── Word highlight update ──────────────────────────────────────────────────
+    // ── Word highlight update (Spicetify real data) ────────────────────────────
     function updateWordHighlights(words) {
       if (!wordModeOn) return;
       const now = performance.now();
@@ -516,27 +617,27 @@
 
     // ── State machine ──────────────────────────────────────────────────────────
     function updateState(state) {
-      // Always update track info from any message that carries it
-      if (state.albumArt)  setAlbumArt(state.albumArt);
-      if (state.trackName) trackNameEl.textContent = state.trackName;
-      if (state.artist)    artistEl.textContent    = state.artist;
+      if (state.albumArt)     setAlbumArt(state.albumArt);
+      if (state.trackName)    trackNameEl.textContent = state.trackName;
+      if (state.artist)       artistEl.textContent    = state.artist;
       if (state.lyricsSource) sourceBadge.textContent = state.lyricsSource;
 
-      // trackInfo: bridge sends this immediately so display shows album art
-      // + track name even before lyrics load
       if (state.type === 'trackInfo') return;
 
       if (state.type === 'fullLyrics') {
         stopRaf();
+        stopLineHighlight();
         clearInterval(syncInterval);
-        allLines      = state.lines;
-        syncType      = state.syncType || 'LINE_SYNCED';
-        positionMs    = state.positionMs || 0;
-        positionSetAt = performance.now();
-        playing       = true;
-        activeIdx     = -1;
-        wordStates    = [];
-        activeWordIdx = -1;
+        allLines        = state.lines;
+        syncType        = state.syncType || 'LINE_SYNCED';
+        positionMs      = state.positionMs || 0;
+        positionSetAt   = performance.now();
+        playing         = true;
+        activeIdx       = -1;
+        prevActiveIdx   = -1;
+        wordStates      = [];
+        activeWordIdx   = -1;
+        hasRealWordSync = false;
         saveCache(state);
         advanceByPosition();
         startSyncInterval();
@@ -558,9 +659,18 @@
       }
 
       if (state.type === 'wordupdate') {
+        hasRealWordSync = true;
         const now = performance.now();
-        // Replace synthesized states with real word data when count differs
-        if (wordStates.length !== state.words.length) {
+
+        // Let Spicetify's word text determine the correct active line
+        const matched = findLineByWords(state.words);
+        const lineChanged = matched !== -1 && matched !== activeIdx;
+        if (lineChanged) { activeIdx = matched; activeWordIdx = -1; }
+
+        // Rebuild wordStates when text changes (catches same-count line changes too)
+        const spText  = state.words.map(w => w.text).join(' ');
+        const curText = wordStates.map(ws => ws.text).join(' ');
+        if (spText !== curText || lineChanged) {
           wordStates    = state.words.map(w => ({
             text: w.text, startPos: 0, startTime: now, duration: 200, revealed: false
           }));
@@ -571,11 +681,10 @@
         return;
       }
 
-      // v2: bridge sends noLyrics when track info is known but no lyrics found
-      // Show album art + track name but keep waiting message instead of blank
       if (state.type === 'noLyrics') {
-        stopRaf(); clearInterval(syncInterval);
-        allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1;
+        stopRaf(); stopLineHighlight(); clearInterval(syncInterval);
+        allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1; prevActiveIdx = -1;
+        hasRealWordSync = false;
         lyricsEl.innerHTML = '';
         waitingEl.textContent = 'No lyrics found';
         lyricsEl.appendChild(waitingEl);
@@ -584,16 +693,16 @@
 
       if (state.type === 'line') {
         if (state.lyric === '') {
-          stopRaf(); clearInterval(syncInterval);
-          allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1;
+          stopRaf(); stopLineHighlight(); clearInterval(syncInterval);
+          allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1; prevActiveIdx = -1;
+          hasRealWordSync = false;
           lyricsEl.innerHTML = '';
           waitingEl.textContent = 'Waiting for music…';
           lyricsEl.appendChild(waitingEl);
           return;
         }
         if (state.lyric) {
-          // Always accept DOM lines as fallback regardless of syncType
-          stopRaf(); wordStates = []; activeWordIdx = -1;
+          stopRaf(); stopLineHighlight(); wordStates = []; activeWordIdx = -1;
           allLines.push({ startTimeMs: 0, text: state.lyric });
           if (allLines.length > 14) allLines = allLines.slice(-14);
           activeIdx = allLines.length - 1;
@@ -606,7 +715,7 @@
     function connect() {
       const ws = new WebSocket(`ws://${location.host}`);
       ws.onmessage = e => { try { updateState(JSON.parse(e.data)); } catch(_) {} };
-      ws.onclose   = () => { stopRaf(); setTimeout(connect, 2000); };
+      ws.onclose   = () => { stopRaf(); stopLineHighlight(); setTimeout(connect, 2000); };
       ws.onerror   = () => ws.close();
     }
 
@@ -624,15 +733,15 @@
     (function() {
       const c = loadCache();
       if (!c) return;
-      if (c.trackName) trackNameEl.textContent = c.trackName;
-      if (c.artist)    artistEl.textContent    = c.artist;
+      if (c.trackName)    trackNameEl.textContent = c.trackName;
+      if (c.artist)       artistEl.textContent    = c.artist;
       if (c.lyricsSource) sourceBadge.textContent = c.lyricsSource;
-      if (c.albumArt)  setAlbumArt(c.albumArt);
+      if (c.albumArt)     setAlbumArt(c.albumArt);
       if (c.lines?.length) {
         allLines  = c.lines;
         syncType  = c.syncType || 'LINE_SYNCED';
         activeIdx = 0;
-        synthesizeWordStates(allLines[0]?.text || '');
+        wordStates = [];
         renderLines();
       }
     })();
@@ -640,5 +749,5 @@
     connect();
   </script>
 </body>
-<!-- v3 -->
+<!-- v4.3 -->
 </html>

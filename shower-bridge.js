@@ -223,7 +223,9 @@
 
   async function trySpotifyApi(trackId) {
     try {
-      const token = Spicetify.Platform.Session.accessToken;
+      const token      = Spicetify.Platform.Session.accessToken;
+      const controller = new AbortController();
+      const timer      = setTimeout(() => controller.abort(), 3000);
 
       const res = await fetch(
         `https://spclient.wg.spotify.com/color-lyrics/v2/track/${trackId}?format=json&vocalRemoval=false&market=from_token`,
@@ -231,9 +233,11 @@
           headers: {
             Authorization: `Bearer ${token}`,
             'app-platform': 'WebPlayer'
-          }
+          },
+          signal: controller.signal
         }
       );
+      clearTimeout(timer);
 
       if (!res.ok) {
         console.warn('[ShowerBridge] Spotify lyrics status:', res.status);
@@ -285,44 +289,42 @@
     let syncType = 'LINE_SYNCED';
     let source = '';
 
-    // 1. LRCLIB exact
+    // Spotify and LRCLib exact run in parallel — neither blocks the other.
+    // Spotify has a 3s abort timeout so a blocked request doesn't stall everything.
+    const [spotifyResult, lrclibExact] = await Promise.all([
+      trySpotifyApi(trackId),
+      tryLrclibExact(meta)
+    ]);
 
-    lines = await tryLrclibExact(meta);
+    // Prefer Spotify synced lyrics (timestamps match wordupdate exactly)
+    if (spotifyResult && spotifyResult.syncType !== 'UNSYNCED') {
+      lines    = spotifyResult.lines;
+      syncType = spotifyResult.syncType;
+      source   = 'spotify';
+    }
 
-    if (lines) {
+    // LRCLib exact already fetched — use it if Spotify didn't deliver synced lyrics
+    if (!lines && lrclibExact) {
+      lines  = lrclibExact;
       source = 'lrclib-exact';
     }
 
-    // 2. LRCLIB search
-
+    // Sequential fallbacks only if both parallel attempts failed
     if (!lines) {
       lines = await tryLrclibSearch(meta);
-
-      if (lines) {
-        source = 'lrclib-search';
-      }
+      if (lines) source = 'lrclib-search';
     }
-
-    // 3. LRCLIB generic query
 
     if (!lines) {
       lines = await tryLrclibQuery(meta);
-
-      if (lines) {
-        source = 'lrclib-query';
-      }
+      if (lines) source = 'lrclib-query';
     }
 
-    // 4. Spotify fallback
-
-    if (!lines) {
-      const spotify = await trySpotifyApi(trackId);
-
-      if (spotify) {
-        lines = spotify.lines;
-        syncType = spotify.syncType;
-        source = 'spotify';
-      }
+    // Spotify unsynced as last resort
+    if (!lines && spotifyResult) {
+      lines    = spotifyResult.lines;
+      syncType = spotifyResult.syncType;
+      source   = 'spotify-unsynced';
     }
 
     // Send
@@ -524,4 +526,4 @@
 
 })();
 
-// v5
+// v7
