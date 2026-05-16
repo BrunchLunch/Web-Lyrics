@@ -247,7 +247,7 @@
         </div>
         <button id="refresh-btn" onclick="refreshPage()">↻</button>
       </div>
-      <div id="version">v4.4</div>
+      <div id="version">v4.9</div>
     </div>
 
     <div id="right">
@@ -278,12 +278,15 @@
     let prevActiveIdx   = -1;
     let syncType        = 'LINE_SYNCED';
     let positionMs      = 0;
-    let positionSetAt   = performance.now();
+    let positionSetAt   = Date.now();
     let playing         = true;
-    let syncInterval    = null;
-    let wordStates      = [];
-    let activeWordIdx   = -1;
-    let rafId           = null;
+    let syncInterval      = null;
+    let clockResyncInterval = null;
+    let wordStates        = [];
+    let activeWordIdx     = -1;
+    let rafId             = null;
+    let tsRafId           = null;
+    let tsWordRevealed    = [];
 
     // ── Line highlight state ───────────────────────────────────────────────────
     let lineHighlightRafId = null;
@@ -334,7 +337,7 @@
 
     function currentPositionMs() {
       if (!playing) return positionMs;
-      return positionMs + (performance.now() - positionSetAt);
+      return positionMs + (Date.now() - positionSetAt);
     }
 
     // ── Gradient word helpers (Spicetify word sync) ────────────────────────────
@@ -344,7 +347,7 @@
       return `linear-gradient(to right, rgba(255,255,255,0.95) ${lo}%, rgba(255,255,255,0.22) ${p}%)`;
     }
     function setRevealed(span) {
-      span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.52) 100%, rgba(255,255,255,0.52) 100%)';
+      span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.95) 100%, rgba(255,255,255,0.95) 100%)';
     }
     function setDim(span) {
       span.style.backgroundImage = 'linear-gradient(to right, rgba(255,255,255,0.22) 100%, rgba(255,255,255,0.22) 100%)';
@@ -422,6 +425,30 @@
       }
     }
 
+    // ── Timestamp word animation (word timestamps from lyrics pipeline) ─────────
+    function animateTimestampWords() {
+      tsRafId = requestAnimationFrame(animateTimestampWords);
+      if (activeIdx < 0) return;
+      const line = allLines[activeIdx];
+      if (!line?.words?.length) return;
+      const activeDiv = lyricsEl.querySelector('.dist-0');
+      if (!activeDiv) return;
+      const spans = activeDiv.querySelectorAll('.word-span');
+      const now   = currentPositionMs();
+      line.words.forEach((w, i) => {
+        const span = spans[i];
+        if (!span) return;
+        if (tsWordRevealed[i]) return;                    // already bright — style is set, skip repaint
+        if (now >= w.endMs)    { tsWordRevealed[i] = true; setRevealed(span); return; }
+        if (now < w.startMs)   return;                    // future word — CSS default keeps it dim, skip repaint
+        const pct = Math.min(100, ((now - w.startMs) / Math.max(1, w.endMs - w.startMs)) * 100);
+        span.style.backgroundImage = gradientFor(pct);
+      });
+    }
+
+    function startTsRaf() { if (!tsRafId) tsRafId = requestAnimationFrame(animateTimestampWords); }
+    function stopTsRaf()  { if (tsRafId) { cancelAnimationFrame(tsRafId); tsRafId = null; } }
+
     // ── Smooth scroll ──────────────────────────────────────────────────────────
     let scrollRaf = null;
 
@@ -438,6 +465,7 @@
           : 1 - Math.pow(-2 * progress + 2, 3) / 2;
         lyricsEl.scrollTop = start + distance * ease;
         if (progress < 1) scrollRaf = requestAnimationFrame(step);
+        else scrollRaf = null;
       }
       scrollRaf = requestAnimationFrame(step);
     }
@@ -480,7 +508,8 @@
 
     function applyActiveLineMode(div) {
       if (wordModeOn && hasRealWordSync && wordStates.length > 0) {
-        stopLineHighlight();
+        // Spicetify DOM word sync (highest priority — most accurate)
+        stopLineHighlight(); stopTsRaf();
         div.innerHTML = '';
         wordStates.forEach((ws, wi) => {
           const span = document.createElement('span');
@@ -494,20 +523,34 @@
           div.appendChild(document.createTextNode(' '));
         });
         startRaf();
+      } else if (wordModeOn && allLines[activeIdx]?.words?.length > 0) {
+        // Timestamp-based word sync for this specific line
+        stopRaf(); stopLineHighlight();
+        const line = allLines[activeIdx];
+        div.innerHTML = '';
+        tsWordRevealed = new Array(line.words.length).fill(false);
+        line.words.forEach(w => {
+          const span = document.createElement('span');
+          span.className   = 'word-span';
+          span.textContent = w.word;
+          div.appendChild(span);
+          div.appendChild(document.createTextNode(' '));
+        });
+        startTsRaf();
       } else if (wordModeOn && !hasRealWordSync) {
-        stopRaf();
+        // Line-duration highlight fallback
+        stopRaf(); stopTsRaf();
         if (div.querySelector('.word-span')) div.textContent = allLines[activeIdx].text || '•••';
         if (activeLineEl !== div) { stopLineHighlight(); startLineHighlight(div); }
       } else {
-        stopRaf();
-        stopLineHighlight();
+        stopRaf(); stopTsRaf(); stopLineHighlight();
         if (div.querySelector('.word-span')) div.textContent = allLines[activeIdx].text || '•••';
       }
     }
 
     function renderLines() {
       if (activeIdx === -1 || !allLines.length) {
-        stopRaf(); stopLineHighlight();
+        stopRaf(); stopTsRaf(); stopLineHighlight();
         lyricsEl.innerHTML = '';
         lyricsEl.appendChild(waitingEl);
         prevActiveIdx = -1;
@@ -519,7 +562,7 @@
 
       if (needRebuild) {
         // Full rebuild only when line count changes (new song / streaming mode)
-        stopRaf(); stopLineHighlight();
+        stopRaf(); stopTsRaf(); stopLineHighlight();
         lyricsEl.innerHTML = '';
         allLines.forEach((line, i) => {
           const div = document.createElement('div');
@@ -533,7 +576,7 @@
         if (prevActiveIdx !== activeIdx && prevActiveIdx >= 0 && existingDivs[prevActiveIdx]) {
           const oldDiv = existingDivs[prevActiveIdx];
           if (activeLineEl === oldDiv) stopLineHighlight();
-          if (oldDiv.querySelector('.word-span')) { stopRaf(); oldDiv.textContent = allLines[prevActiveIdx]?.text || '•••'; }
+          if (oldDiv.querySelector('.word-span')) { stopRaf(); stopTsRaf(); oldDiv.textContent = allLines[prevActiveIdx]?.text || '•••'; }
         }
         existingDivs.forEach((div, i) => {
           div.className = `lyric-line ${distClass(i - activeIdx)}`;
@@ -625,28 +668,36 @@
       if (state.type === 'trackInfo') return;
 
       if (state.type === 'fullLyrics') {
-        stopRaf();
+        stopRaf(); stopTsRaf();
         stopLineHighlight();
         clearInterval(syncInterval);
-        allLines        = state.lines;
-        syncType        = state.syncType || 'LINE_SYNCED';
-        positionMs      = state.positionMs || 0;
-        positionSetAt   = performance.now();
-        playing         = true;
-        activeIdx       = -1;
-        prevActiveIdx   = -1;
-        wordStates      = [];
-        activeWordIdx   = -1;
+        allLines             = state.lines;
+        syncType             = state.syncType || 'LINE_SYNCED';
+        positionMs           = state.positionMs || 0;
+        positionSetAt        = Date.now();
+        playing              = state.playing !== false;
+        activeIdx            = -1;
+        prevActiveIdx        = -1;
+        wordStates           = [];
+        activeWordIdx        = -1;
         hasRealWordSync = false;
         saveCache(state);
         advanceByPosition();
         startSyncInterval();
+        resyncClock();
+        startClockResync();
         return;
       }
 
       if (state.type === 'position') {
-        positionMs    = state.positionMs;
-        positionSetAt = performance.now();
+        // Clock is autonomous — ignore routine position pushes.
+        // Only snap on large differences that indicate a real user seek.
+        // Drift is corrected by the 15 s server poll instead.
+        const diff = state.positionMs - currentPositionMs();
+        if (Math.abs(diff) > 3000) {
+          positionMs    = state.positionMs;
+          positionSetAt = Date.now();
+        }
         advanceByPosition();
         return;
       }
@@ -654,7 +705,7 @@
       if (state.type === 'playpause') {
         playing       = state.playing;
         positionMs    = state.positionMs;
-        positionSetAt = performance.now();
+        positionSetAt = Date.now();
         return;
       }
 
@@ -682,7 +733,7 @@
       }
 
       if (state.type === 'noLyrics') {
-        stopRaf(); stopLineHighlight(); clearInterval(syncInterval);
+        stopRaf(); stopTsRaf(); stopLineHighlight(); clearInterval(syncInterval);
         allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1; prevActiveIdx = -1;
         hasRealWordSync = false;
         lyricsEl.innerHTML = '';
@@ -693,7 +744,7 @@
 
       if (state.type === 'line') {
         if (state.lyric === '') {
-          stopRaf(); stopLineHighlight(); clearInterval(syncInterval);
+          stopRaf(); stopTsRaf(); stopLineHighlight(); clearInterval(syncInterval);
           allLines = []; wordStates = []; activeWordIdx = -1; activeIdx = -1; prevActiveIdx = -1;
           hasRealWordSync = false;
           lyricsEl.innerHTML = '';
@@ -702,7 +753,7 @@
           return;
         }
         if (state.lyric) {
-          stopRaf(); stopLineHighlight(); wordStates = []; activeWordIdx = -1;
+          stopRaf(); stopTsRaf(); stopLineHighlight(); wordStates = []; activeWordIdx = -1;
           allLines.push({ startTimeMs: 0, text: state.lyric });
           if (allLines.length > 14) allLines = allLines.slice(-14);
           activeIdx = allLines.length - 1;
@@ -715,7 +766,7 @@
     function connect() {
       const ws = new WebSocket(`ws://${location.host}`);
       ws.onmessage = e => { try { updateState(JSON.parse(e.data)); } catch(_) {} };
-      ws.onclose   = () => { stopRaf(); stopLineHighlight(); setTimeout(connect, 2000); };
+      ws.onclose   = () => { stopRaf(); stopTsRaf(); stopLineHighlight(); setTimeout(connect, 2000); };
       ws.onerror   = () => ws.close();
     }
 
@@ -728,6 +779,32 @@
     }
     setInterval(pollBridgeStatus, 3000);
     pollBridgeStatus();
+
+    // ── Autonomous clock resync ────────────────────────────────────────────────
+    function resyncClock() {
+      if (!playing) return;
+      fetch('/status')
+        .then(r => r.json())
+        .then(s => {
+          if (typeof s.positionMs !== 'number') return;
+          const diff = s.positionMs - currentPositionMs();
+          // Only snap forward (server ahead >500ms) or for genuine backward seek (>3s).
+          // Never apply small backward corrections — server routinely lags the display
+          // by up to 500ms due to bridge heartbeat timing.
+          if (diff > 500 || diff < -3000) {
+            positionMs    = s.positionMs;
+            positionSetAt = Date.now();
+          }
+        })
+        .catch(() => {});
+    }
+
+    function startClockResync() {
+      clearInterval(clockResyncInterval);
+      clockResyncInterval = setInterval(resyncClock, 15000);
+    }
+
+    startClockResync();
 
     // Restore from cache instantly — all functions defined above this point
     (function() {
@@ -747,7 +824,26 @@
     })();
 
     connect();
+
+    // Resync immediately whenever the tab becomes visible again.
+    // Browsers can throttle performance.now() precision or pause RAF when a
+    // tab is hidden, leaving positionSetAt stale.  A forced fetch on focus
+    // corrects this before the next 15 s interval fires.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        stopTsRaf();
+        stopRaf();
+        stopLineHighlight();
+      } else {
+        resyncClock();
+        startSyncInterval();
+        if (activeIdx >= 0) {
+          const activeDiv = lyricsEl.querySelector('.dist-0');
+          if (activeDiv) applyActiveLineMode(activeDiv);
+        }
+      }
+    });
   </script>
 </body>
-<!-- v4.4 -->
+<!-- v4.9 -->
 </html>

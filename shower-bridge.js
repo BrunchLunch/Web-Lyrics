@@ -3,8 +3,10 @@
 
   let ws = null;
   let wordPollInterval = null;
+  let positionHeartbeatInterval = null;
   let currentTrackId = null;
   let playerReady = false;
+  let lyricsObserver = null;
 
   // ─────────────────────────────────────────────────────────────
   // WebSocket
@@ -22,7 +24,13 @@
       }
     };
 
-    ws.onclose = () => setTimeout(connect, 3000);
+    ws.onclose = () => {
+      clearInterval(wordPollInterval);
+      clearInterval(positionHeartbeatInterval);
+      wordPollInterval = null;
+      positionHeartbeatInterval = null;
+      setTimeout(connect, 3000);
+    };
     ws.onerror = () => ws.close();
   }
 
@@ -115,32 +123,49 @@
   // LRC Parsing
   // ─────────────────────────────────────────────────────────────
 
+  function lrcMs(mm, ss, xx) {
+    return parseInt(mm) * 60000 + parseInt(ss) * 1000 + parseInt(xx.padEnd(3, '0'));
+  }
+
+  function splitWords(text) {
+    const stripped = text.replace(/[♪♫♩♬]/g, '').trim();
+    if (!stripped || /^[.\s]+$/.test(stripped)) return [];
+    return stripped.split(/\s+/).filter(w => w.length > 0);
+  }
+
+  // Returns { lines: [{startTimeMs, text, wordTimestamps?}], hasWordTimestamps } | null
   function parseLrc(lrc) {
     if (!lrc) return null;
 
+    const hasWordTags = /<\d{2}:\d{2}\.\d{2,3}>/.test(lrc);
     const lines = [];
 
-    for (const line of lrc.split('\n')) {
-      const match = line.match(/^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/);
+    for (const raw of lrc.split('\n')) {
+      const m = raw.match(/^\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)/);
+      if (!m) continue;
 
-      if (!match) continue;
+      const lineMs = lrcMs(m[1], m[2], m[3]);
+      const body   = m[4];
 
-      const ms =
-        parseInt(match[1]) * 60000 +
-        parseInt(match[2]) * 1000 +
-        parseInt(match[3].padEnd(3, '0'));
-
-      const text = match[4].trim();
-
-      if (text) {
-        lines.push({
-          startTimeMs: ms,
-          text
-        });
+      if (hasWordTags) {
+        const wMatches = [...body.matchAll(/<(\d{2}):(\d{2})\.(\d{2,3})>([^<]*)/g)];
+        if (wMatches.length) {
+          const wordTimestamps = wMatches
+            .map(wm => ({ startMs: lrcMs(wm[1], wm[2], wm[3]), text: wm[4].trim() }))
+            .filter(wt => splitWords(wt.text).length > 0);
+          const text = wordTimestamps.map(wt => wt.text).join(' ');
+          if (text) lines.push({ startTimeMs: lineMs, text, wordTimestamps });
+        } else {
+          const text = body.replace(/<[^>]+>/g, '').trim();
+          if (text && text !== '♪') lines.push({ startTimeMs: lineMs, text });
+        }
+      } else {
+        const text = body.trim();
+        if (text && text !== '♪') lines.push({ startTimeMs: lineMs, text });
       }
     }
 
-    return lines.length ? lines : null;
+    return lines.length ? { lines, hasWordTimestamps: hasWordTags } : null;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -152,14 +177,21 @@
       `http://localhost:3000${path}?` +
       new URLSearchParams(params).toString();
 
-    const res = await fetch(url);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
 
-    if (!res.ok) {
-      console.warn('[ShowerBridge] Proxy status:', res.status);
-      return null;
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+
+      if (!res.ok) {
+        console.warn('[ShowerBridge] Proxy status:', res.status);
+        return null;
+      }
+
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
     }
-
-    return await res.json();
   }
 
   async function tryLrclibExact(meta) {
@@ -223,7 +255,9 @@
 
   async function trySpotifyApi(trackId) {
     try {
-      const token      = Spicetify.Platform.Session.accessToken;
+      const token = Spicetify?.Platform?.Session?.accessToken;
+      if (!token) return null;
+
       const controller = new AbortController();
       const timer      = setTimeout(() => controller.abort(), 3000);
 
@@ -245,20 +279,12 @@
       }
 
       const data = await res.json();
+      const syncType = data?.lyrics?.syncType || 'UNSYNCED';
+      const rawLines = data?.lyrics?.lines || [];
 
-      const lines = (data?.lyrics?.lines || [])
-        .map(l => ({
-          startTimeMs: parseInt(l.startTimeMs || 0),
-          text: l.words || ''
-        }))
-        .filter(l => l.text && l.text !== '♪');
+      if (!rawLines.length) return null;
 
-      if (!lines.length) return null;
-
-      return {
-        lines,
-        syncType: data?.lyrics?.syncType || 'UNSYNCED'
-      };
+      return { rawLines, syncType };
 
     } catch (e) {
       console.warn('[ShowerBridge] Spotify API error:', e.message);
@@ -267,89 +293,178 @@
   }
 
   // ─────────────────────────────────────────────────────────────
+  // Normalizers — produce canonical {lineIndex, startMs, endMs, rawText,
+  //   syncSource, words[], startTimeMs, text} regardless of source
+  // ─────────────────────────────────────────────────────────────
+
+  // Normalize raw Spotify API lines (handles WORD_SYNCED syllables + LINE_SYNCED)
+  function normalizeSpotifyLines(rawLines, syncType, trackDurationMs) {
+    const out = [];
+    for (let i = 0; i < rawLines.length; i++) {
+      const raw  = rawLines[i];
+      const next = rawLines[i + 1];
+      const startMs = parseInt(raw.startTimeMs || 0);
+      const endMs   = next ? parseInt(next.startTimeMs || 0) : (trackDurationMs || startMs + 5000);
+
+      let rawText, words, syncSource;
+
+      if (raw.syllables?.length) {
+        rawText    = raw.syllables.map(s => s.syllable).join(' ');
+        words      = raw.syllables.map((s, si) => {
+          const nextS = raw.syllables[si + 1];
+          return {
+            word:    s.syllable,
+            startMs: parseInt(s.startTimeMs || 0),
+            endMs:   nextS ? parseInt(nextS.startTimeMs || 0) : (parseInt(raw.endTimeMs) || endMs)
+          };
+        });
+        syncSource = 'word_synced';
+      } else {
+        rawText = (raw.words || '').replace(/[♪♫♩♬]/g, '').trim();
+        if (!splitWords(rawText).length) continue;
+        syncSource = 'line_estimated';
+      }
+
+      if (!rawText) continue;
+      out.push({
+        lineIndex: out.length, startMs, endMs, rawText, syncSource,
+        ...(words ? { words } : {}),
+        startTimeMs: startMs, text: rawText
+      });
+    }
+    return out;
+  }
+
+  // Normalize LRCLIB parsed lines (handles Enhanced LRC word timestamps + standard LRC)
+  function normalizeLrclibLines(lines, trackDurationMs) {
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+      const raw  = lines[i];
+      const next = lines[i + 1];
+      const startMs = raw.startTimeMs;
+      const endMs   = next ? next.startTimeMs : (trackDurationMs || startMs + 5000);
+
+      let words, syncSource;
+
+      if (raw.wordTimestamps?.length) {
+        words = raw.wordTimestamps.map((wt, wi) => {
+          const nextWt = raw.wordTimestamps[wi + 1];
+          return { word: wt.text, startMs: wt.startMs, endMs: nextWt ? nextWt.startMs : endMs };
+        });
+        syncSource = 'word_synced';
+      } else {
+        if (!splitWords(raw.text).length) continue;
+        syncSource = 'line_estimated';
+      }
+
+      out.push({
+        lineIndex: out.length, startMs, endMs, rawText: raw.text, syncSource,
+        ...(words ? { words } : {}),
+        startTimeMs: startMs, text: raw.text
+      });
+    }
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────
   // Main Lyrics Fetch
   // ─────────────────────────────────────────────────────────────
 
   async function fetchAndSendLyrics() {
     const trackId = getTrackId();
-    const meta = getCleanMeta();
+    const meta    = getCleanMeta();
 
     if (!trackId || !meta) return;
 
     currentTrackId = trackId;
 
-    console.log(
-      '[ShowerBridge] Fetching:',
-      meta.title,
-      '/',
-      meta.artist_name
-    );
+    console.log('[ShowerBridge] Fetching:', meta.title, '/', meta.artist_name);
 
-    let lines = null;
+    const trackDurationMs = parseInt(meta.duration || 0);
+    let lines    = null;
     let syncType = 'LINE_SYNCED';
-    let source = '';
+    let source   = '';
 
-    // Spotify and LRCLib exact run in parallel — neither blocks the other.
+    // Spotify and LRCLib exact run in parallel.
     // Spotify has a 3s abort timeout so a blocked request doesn't stall everything.
     const [spotifyResult, lrclibExact] = await Promise.all([
       trySpotifyApi(trackId),
       tryLrclibExact(meta)
     ]);
 
-    // Prefer Spotify synced lyrics (timestamps match wordupdate exactly)
+    // Prefer Spotify synced lyrics
     if (spotifyResult && spotifyResult.syncType !== 'UNSYNCED') {
-      lines    = spotifyResult.lines;
-      syncType = spotifyResult.syncType;
-      source   = 'spotify';
+      const normalized = normalizeSpotifyLines(spotifyResult.rawLines, spotifyResult.syncType, trackDurationMs);
+      if (normalized.length) {
+        lines    = normalized;
+        syncType = spotifyResult.syncType;
+        source   = 'spotify';
+      }
     }
 
     // LRCLib exact already fetched — use it if Spotify didn't deliver synced lyrics
     if (!lines && lrclibExact) {
-      lines  = lrclibExact;
-      source = 'lrclib-exact';
+      const normalized = normalizeLrclibLines(lrclibExact.lines, trackDurationMs);
+      if (normalized.length) {
+        lines    = normalized;
+        syncType = lrclibExact.hasWordTimestamps ? 'WORD_SYNCED' : 'LINE_SYNCED';
+        source   = 'lrclib-exact';
+      }
     }
 
     // Sequential fallbacks only if both parallel attempts failed
     if (!lines) {
-      lines = await tryLrclibSearch(meta);
-      if (lines) source = 'lrclib-search';
+      const r = await tryLrclibSearch(meta);
+      if (r) {
+        const normalized = normalizeLrclibLines(r.lines, trackDurationMs);
+        if (normalized.length) {
+          lines    = normalized;
+          syncType = r.hasWordTimestamps ? 'WORD_SYNCED' : 'LINE_SYNCED';
+          source   = 'lrclib-search';
+        }
+      }
     }
 
     if (!lines) {
-      lines = await tryLrclibQuery(meta);
-      if (lines) source = 'lrclib-query';
+      const r = await tryLrclibQuery(meta);
+      if (r) {
+        const normalized = normalizeLrclibLines(r.lines, trackDurationMs);
+        if (normalized.length) {
+          lines    = normalized;
+          syncType = r.hasWordTimestamps ? 'WORD_SYNCED' : 'LINE_SYNCED';
+          source   = 'lrclib-query';
+        }
+      }
     }
 
     // Spotify unsynced as last resort
     if (!lines && spotifyResult) {
-      lines    = spotifyResult.lines;
-      syncType = spotifyResult.syncType;
-      source   = 'spotify-unsynced';
+      const normalized = normalizeSpotifyLines(spotifyResult.rawLines, spotifyResult.syncType, trackDurationMs);
+      if (normalized.length) {
+        lines    = normalized;
+        syncType = 'UNSYNCED';
+        source   = 'spotify-unsynced';
+      }
     }
 
-    // Send
+    // If the user skipped mid-fetch, discard results for the old track
+    if (currentTrackId !== trackId) return;
 
-    if (lines) {
-      console.log(
-        `[ShowerBridge] Lyrics from ${source} (${lines.length} lines)`
-      );
-
+    if (lines?.length) {
+      console.log(`[ShowerBridge] Lyrics from ${source} (${lines.length} lines)`);
       send({
         type: 'fullLyrics',
         lines,
         syncType,
         lyricsSource: source,
         positionMs: Spicetify.Player.getProgress(),
+        playing: Spicetify.Player.isPlaying(),
         ...getTrackInfo()
       });
-
+      startPositionHeartbeat();
     } else {
       console.warn('[ShowerBridge] No lyrics found');
-
-      send({
-        type: 'noLyrics',
-        ...getTrackInfo()
-      });
+      send({ type: 'noLyrics', ...getTrackInfo() });
     }
   }
 
@@ -432,7 +547,15 @@
     }, 50);
   }
 
+  function startPositionHeartbeat() {
+    clearInterval(positionHeartbeatInterval);
+    positionHeartbeatInterval = setInterval(() => {
+      send({ type: 'position', positionMs: Spicetify.Player.getProgress() });
+    }, 5000);
+  }
+
   function observeLyrics() {
+    if (lyricsObserver) lyricsObserver.disconnect();
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         if (mutation.type !== 'attributes') continue;
@@ -462,6 +585,7 @@
       }
     });
 
+    lyricsObserver = observer;
     observer.observe(document.body, {
       subtree: true,
       attributes: true,
@@ -477,6 +601,7 @@
     currentTrackId = null;
 
     clearInterval(wordPollInterval);
+    clearInterval(positionHeartbeatInterval);
 
     setTimeout(() => {
       sendTrackInfo();

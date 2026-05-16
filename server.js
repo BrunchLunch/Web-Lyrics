@@ -105,7 +105,7 @@ let currentState = {
 
 let lastFullLyrics  = null;
 let positionSetAt   = Date.now();
-let playerIsPlaying = true;
+let playerIsPlaying = false;
 
 function currentPositionMs() {
   const base = currentState.positionMs || 0;
@@ -117,7 +117,6 @@ function currentPositionMs() {
 const wss = new WebSocketServer({ server });
 
 const PING_INTERVAL = 20000;
-const PING_TIMEOUT  = 10000;
 
 function heartbeat() { this.isAlive = true; }
 
@@ -190,6 +189,9 @@ wss.on('connection', (ws, req) => {
           console.log('[Lyrics] Cleared (song change)');
         }
         currentState = parsed;
+      } else if (parsed.type === 'noLyrics') {
+        lastFullLyrics = null;
+        currentState   = parsed;
       } else if (parsed.type !== 'wordupdate') {
         currentState = parsed;
       }
@@ -207,9 +209,35 @@ wss.on('connection', (ws, req) => {
 // add this BELOW everything else
 
 // ── Graceful shutdown ────────────────────────────────────────────────────────
-process.on('SIGINT', () => {
-  console.log('\n[Server] Shutting down...');
+const openSockets = new Set();
+server.on('connection', socket => {
+  openSockets.add(socket);
+  socket.once('close', () => openSockets.delete(socket));
+});
+
+function shutdown(signal) {
+  console.log(`\n[Server] ${signal} — shutting down...`);
   clearInterval(pingInterval);
   wss.clients.forEach(ws => ws.terminate());
-  server.close(() => process.exit(0));
+  openSockets.forEach(socket => socket.destroy());
+
+  const forceExit = setTimeout(() => {
+    console.error('[Server] Graceful close timed out — forcing exit');
+    process.exit(1);
+  }, 5000);
+  forceExit.unref();
+
+  server.close(() => {
+    clearTimeout(forceExit);
+    console.log('[Server] Closed cleanly');
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught exception:', err);
+  shutdown('uncaughtException');
 });
